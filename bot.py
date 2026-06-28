@@ -185,7 +185,7 @@ class SwingBot:
                 exit_price = self._get_last_exit_price(symbol)
                 if exit_price:
                     pnl   = calc_pnl(info['side'], info['entry'], exit_price, info['qty'])
-                    ctype = close_type_from_price(info['side'], exit_price, info['sl'], info['tp'])
+                    ctype = close_type_from_price(info['side'], exit_price, info['sl'], info['tp']) if info.get('sl') and info.get('tp') else 'reversal'
                     notifications.trade_closed(symbol, info['side'], info['entry'], exit_price, pnl, ctype)
                 else:
                     notifications.notify(f"📊 {symbol} position closed (SL or TP hit — could not fetch exit price)")
@@ -308,13 +308,96 @@ class SwingBot:
         except Exception as e:
             log.error(f"Error on {symbol}: {e}")
 
+    # ── Startup: restore positions from exchange ─────────────────────────────
+
+    def _restore_positions(self) -> None:
+        """On startup, rebuild self.tracked from any open positions on the exchange."""
+        if DRY_RUN:
+            return  # nothing to restore in dry run
+        log.info("Checking exchange for existing open positions…")
+        restored = []
+        for symbol in PAIRS:
+            try:
+                positions = self.exchange.fetch_positions([symbol])
+                for pos in positions:
+                    if pos['contracts'] and abs(float(pos['contracts'])) > 0:
+                        side  = pos['side']
+                        entry = float(pos.get('entryPrice', 0))
+                        qty   = abs(float(pos.get('contracts', 0)))
+                        self.tracked[symbol] = {
+                            'side':  side,
+                            'entry': entry,
+                            'qty':   qty,
+                            'sl':    None,   # unknown after restart
+                            'tp':    None,   # unknown after restart
+                            'risk':  0,
+                        }
+                        restored.append(f"{side.upper()} {symbol.replace(':USDT', '')}")
+                        log.info(f"Restored: {side} {symbol} entry={entry}")
+            except Exception as e:
+                log.warning(f"Could not check {symbol} on startup: {e}")
+
+        if restored:
+            msg = (
+                "🔄 <b>Bot restarted</b>\n"
+                f"Restored {len(restored)} open position(s):\n" +
+                "\n".join(f"  • {r}" for r in restored)
+            )
+            notifications.notify(msg)
+        else:
+            log.info("No open positions found at startup")
+
+    # ── Live position data for /status ────────────────────────────────────────
+
+    def _get_positions_for_status(self) -> list:
+        """Returns enriched position list with live value and P&L."""
+        result = []
+        if DRY_RUN:
+            for sym, info in self.tracked.items():
+                try:
+                    mark = float(self.exchange.fetch_ticker(sym)['last'])
+                except Exception:
+                    mark = info['entry']
+                qty      = info['qty']
+                notional = round(qty * mark, 2)
+                pnl      = calc_pnl(info['side'], info['entry'], mark, qty)
+                pnl_pct  = round(pnl / (info['entry'] * qty) * 100, 2) if info['entry'] else 0
+                result.append({
+                    'symbol':         sym,
+                    'side':           info['side'],
+                    'entry':          info['entry'],
+                    'mark_price':     mark,
+                    'notional':       notional,
+                    'unrealized_pnl': round(pnl, 2),
+                    'percentage':     pnl_pct,
+                })
+        else:
+            for symbol in PAIRS:
+                try:
+                    positions = self.exchange.fetch_positions([symbol])
+                    for pos in positions:
+                        if pos['contracts'] and abs(float(pos['contracts'])) > 0:
+                            result.append({
+                                'symbol':         symbol,
+                                'side':           pos['side'],
+                                'entry':          float(pos.get('entryPrice', 0)),
+                                'mark_price':     float(pos.get('markPrice', 0)),
+                                'notional':       abs(float(pos.get('notional', 0))),
+                                'unrealized_pnl': float(pos.get('unrealizedPnl', 0)),
+                                'percentage':     float(pos.get('percentage', 0)),
+                            })
+                except Exception as e:
+                    log.warning(f"Could not fetch live position for {symbol}: {e}")
+        return result
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         import telegram_listener
         log.info("🤖 Swing Bot starting up…")
         self.exchange.load_markets()
-        telegram_listener.start(self.tracked)
+        self._restore_positions()
+        telegram_listener.start(self.tracked, self._get_positions_for_status)
 
         while True:
             log.info("═══ Cycle start ═══")
