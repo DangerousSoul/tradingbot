@@ -26,10 +26,14 @@ log = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def seconds_to_next_4h() -> float:
+# Maps timeframe string to hours
+TIMEFRAME_HOURS = {'1h': 1, '2h': 2, '4h': 4, '6h': 6, '8h': 8, '12h': 12, '1d': 24}
+
+def seconds_to_next_candle() -> float:
+    hours      = TIMEFRAME_HOURS.get(TIMEFRAME, 4)
     now        = datetime.now(timezone.utc)
     total_secs = now.hour * 3600 + now.minute * 60 + now.second
-    period     = 4 * 3600
+    period     = hours * 3600
     remaining  = period - (total_secs % period) + 15
     return max(remaining, 60)
 
@@ -309,11 +313,6 @@ class SwingBot:
     def run(self) -> None:
         import telegram_listener
         log.info("🤖 Swing Bot starting up…")
-        notifications.notify(
-            "🤖 Swing Bot started\n"
-            "Monitoring: BTC, ETH, SOL, BNB on 4H\n"
-            "Type /data for stats  |  /help for commands"
-        )
         self.exchange.load_markets()
         telegram_listener.start(self.tracked)
 
@@ -327,6 +326,6 @@ class SwingBot:
                 self._run_pair(symbol)
                 time.sleep(1)
 
-            wait = seconds_to_next_4h()
-            log.info(f"Sleeping {wait / 60:.1f} min until next 4H candle…")
+            wait = seconds_to_next_candle()
+            log.info(f"Sleeping {wait / 60:.1f} min until next {TIMEFRAME} candle…")
             time.sleep(wait)
