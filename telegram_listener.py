@@ -34,29 +34,47 @@ def _send(chat_id: str, text: str) -> None:
 
 # ── Command handlers ──────────────────────────────────────────────────────────
 
-def _cmd_status(chat_id: str, tracked: dict) -> None:
-    """Reply instantly confirming bot is alive, open positions, next candle."""
+def _cmd_status(chat_id: str, get_positions_fn) -> None:
+    """Reply instantly confirming bot is alive, with live position value and P&L."""
+    from config import TIMEFRAME
+    TIMEFRAME_HOURS = {'1h': 1, '2h': 2, '4h': 4, '6h': 6, '8h': 8, '12h': 12, '1d': 24}
     now        = datetime.now(timezone.utc)
     total_secs = now.hour * 3600 + now.minute * 60 + now.second
-    period     = 4 * 3600
+    hours      = TIMEFRAME_HOURS.get(TIMEFRAME, 4)
+    period     = hours * 3600
     remaining  = period - (total_secs % period)
     hrs        = remaining // 3600
     mins       = (remaining % 3600) // 60
 
-    if tracked:
-        lines = "\n".join(
-            f"  • {info['side'].upper()} {sym.replace(':USDT', '')}  "
-            f"entry=${info['entry']:,.2f}"
-            for sym, info in tracked.items()
-        )
-        pos_text = f"<b>Open Positions ({len(tracked)}):</b>\n{lines}"
+    positions = get_positions_fn()
+
+    if positions:
+        lines = []
+        for pos in positions:
+            pair    = pos['symbol'].replace(':USDT', '')
+            side    = pos['side'].upper()
+            entry   = pos['entry']
+            mark    = pos['mark_price']
+            value   = pos['notional']
+            pnl     = pos['unrealized_pnl']
+            pct     = pos['percentage']
+            emoji   = "📈" if pos['side'] == 'long' else "📉"
+            pnl_str = f"+${pnl:.2f} (+{pct:.2f}%) 🟢" if pnl >= 0 else f"-${abs(pnl):.2f} ({pct:.2f}%) 🔴"
+            lines.append(
+                f"{emoji} <b>{side} {pair}</b>\n"
+                f"   Entry:  ${entry:,.4f}\n"
+                f"   Price:  ${mark:,.4f}\n"
+                f"   Value:  ${value:,.2f}\n"
+                f"   P&L:    {pnl_str}"
+            )
+        pos_text = f"<b>Open Positions ({len(positions)}):</b>\n\n" + "\n\n".join(lines)
     else:
         pos_text = "Open Positions: <b>none</b>"
 
     _send(chat_id, (
         f"✅ <b>Bot is running</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 Next candle check: {hrs}h {mins}m\n"
+        f"🕐 Next {TIMEFRAME} candle: {hrs}h {mins}m\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"{pos_text}\n"
     ))
@@ -119,7 +137,7 @@ def _cmd_help(chat_id: str) -> None:
 
 # ── Polling loop ──────────────────────────────────────────────────────────────
 
-def _poll(tracked: dict) -> None:
+def _poll(tracked: dict, get_positions_fn) -> None:
     offset = None
     log.info("Telegram command listener running…")
 
@@ -141,7 +159,7 @@ def _poll(tracked: dict) -> None:
                     continue
 
                 if text == '/status':
-                    _cmd_status(chat_id, tracked)
+                    _cmd_status(chat_id, get_positions_fn)
                 elif text == '/data':
                     _cmd_data(chat_id, tracked)
                 elif text == '/help':
@@ -154,10 +172,10 @@ def _poll(tracked: dict) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def start(tracked: dict) -> None:
+def start(tracked: dict, get_positions_fn) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         log.info("Telegram not configured — command listener disabled")
         return
-    t = threading.Thread(target=_poll, args=(tracked,), daemon=True)
+    t = threading.Thread(target=_poll, args=(tracked, get_positions_fn), daemon=True)
     t.start()
     log.info("Telegram listener started  (/status  /data  /help)")
